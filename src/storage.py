@@ -841,7 +841,35 @@ class DatabaseManager:
             results = session.execute(data_query).scalars().all()
             
             return list(results), total
-    
+
+    def delete_analysis_history(self, query_id: str) -> bool:
+        """
+        删除指定 query_id 的分析历史记录
+
+        Args:
+            query_id: 分析记录唯一标识
+
+        Returns:
+            是否成功删除（True=已删除, False=记录不存在）
+        """
+        with self.get_session() as session:
+            try:
+                record = session.execute(
+                    select(AnalysisHistory).where(AnalysisHistory.query_id == query_id)
+                ).scalar_one_or_none()
+
+                if record is None:
+                    return False
+
+                session.delete(record)
+                session.commit()
+                logger.info(f"已删除分析历史: query_id={query_id}")
+                return True
+            except Exception as e:
+                session.rollback()
+                logger.error(f"删除分析历史失败: {e}")
+                raise
+
     def get_data_range(
         self, 
         code: str, 

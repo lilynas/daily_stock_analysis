@@ -3,6 +3,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import type { HistoryItem, AnalysisReport, TaskInfo } from '../types/analysis';
 import { historyApi } from '../api/history';
 import { analysisApi, DuplicateTaskError } from '../api/analysis';
+import { systemConfigApi } from '../api/systemConfig';
 import { validateStockCode } from '../utils/validation';
 import { getRecentStartDate, toDateInputValue } from '../utils/format';
 import { useAnalysisStore } from '../stores/analysisStore';
@@ -23,7 +24,7 @@ const HomePage: React.FC = () => {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [inputError, setInputError] = useState<string>();
 
-// 历史列表状态
+  // 历史列表状态
   const [historyItems, setHistoryItems] = useState<HistoryItem[]>([]);
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
@@ -38,6 +39,9 @@ const HomePage: React.FC = () => {
   // 任务队列状态
   const [activeTasks, setActiveTasks] = useState<TaskInfo[]>([]);
   const [duplicateError, setDuplicateError] = useState<string | null>(null);
+
+  // 自选股列表
+  const [stockList, setStockList] = useState<string[]>([]);
 
   // 用于跟踪当前分析请求，避免竞态条件
   const analysisRequestIdRef = useRef<number>(0);
@@ -89,7 +93,7 @@ const HomePage: React.FC = () => {
     enabled: true,
   });
 
-// 加载历史列表
+  // 加载历史列表
   const fetchHistory = useCallback(async (autoSelectFirst = false, reset = true) => {
     if (reset) {
       setIsLoadingHistory(true);
@@ -169,8 +173,9 @@ const HomePage: React.FC = () => {
   };
 
   // 分析股票（异步模式）
-  const handleAnalyze = async () => {
-    const { valid, message, normalized } = validateStockCode(stockCode);
+  const handleAnalyze = async (codeOverride?: string) => {
+    const codeToAnalyze = codeOverride || stockCode;
+    const { valid, message, normalized } = validateStockCode(codeToAnalyze);
     if (!valid) {
       setInputError(message);
       return;
@@ -215,12 +220,72 @@ const HomePage: React.FC = () => {
     }
   };
 
+  // 重新分析（从报告详情页触发）
+  const handleReanalyze = async (code: string) => {
+    setDuplicateError(null);
+    setIsAnalyzing(true);
+    setLoading(true);
+    setStoreError(null);
+
+    try {
+      const response = await analysisApi.analyzeAsync({
+        stockCode: code,
+        reportType: 'detailed',
+        forceRefresh: true,
+      });
+      console.log('Re-analysis task submitted:', response.taskId);
+    } catch (err) {
+      if (err instanceof DuplicateTaskError) {
+        setDuplicateError(`股票 ${err.stockCode} 正在分析中，请等待完成`);
+      } else {
+        setStoreError(err instanceof Error ? err.message : '分析失败');
+      }
+    } finally {
+      setIsAnalyzing(false);
+      setLoading(false);
+    }
+  };
+
   // 回车提交
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && stockCode && !isAnalyzing) {
       handleAnalyze();
     }
   };
+
+  // 删除历史记录
+  const handleDeleteHistory = async (queryId: string) => {
+    try {
+      await historyApi.delete(queryId);
+      setHistoryItems((prev) => prev.filter((item) => item.queryId !== queryId));
+      // 如果删除的是当前选中的报告，清空右侧面板
+      if (selectedReport?.meta.queryId === queryId) {
+        setSelectedReport(null);
+      }
+    } catch (err) {
+      console.error('删除历史记录失败:', err);
+    }
+  };
+
+  // 加载自选股列表
+  useEffect(() => {
+    const loadStockList = async () => {
+      try {
+        const config = await systemConfigApi.getConfig(false);
+        const stockItem = config.items?.find(
+          (item) => item.key === 'STOCK_LIST' || item.key === 'stock_list'
+        );
+        const raw = stockItem?.value || '';
+        if (raw.trim()) {
+          const codes = raw.split(',').map((s: string) => s.trim()).filter(Boolean);
+          setStockList(codes);
+        }
+      } catch (err) {
+        console.warn('加载自选股列表失败:', err);
+      }
+    };
+    loadStockList();
+  }, []);
 
   return (
     <div
@@ -271,6 +336,25 @@ const HomePage: React.FC = () => {
             )}
           </button>
         </div>
+        {stockList.length > 0 && (
+          <div className="flex items-center gap-1.5 flex-shrink-0 overflow-x-auto ml-1" style={{ maxWidth: '50%' }}>
+            <span className="text-xs text-muted whitespace-nowrap">自选:</span>
+            {stockList.map((code) => (
+              <button
+                key={code}
+                type="button"
+                onClick={() => {
+                  setStockCode(code);
+                  handleAnalyze(code);
+                }}
+                disabled={isAnalyzing}
+                className="px-2 py-0.5 text-xs rounded-full bg-white/5 hover:bg-cyan/15 text-secondary hover:text-cyan border border-white/10 hover:border-cyan/30 transition-all whitespace-nowrap disabled:opacity-50"
+              >
+                {code}
+              </button>
+            ))}
+          </div>
+        )}
       </header>
 
       {/* 左侧：任务面板 + 历史列表 */}
@@ -285,6 +369,7 @@ const HomePage: React.FC = () => {
           hasMore={hasMore}
           selectedQueryId={selectedReport?.meta.queryId}
           onItemClick={handleHistoryClick}
+          onDeleteItem={handleDeleteHistory}
           onLoadMore={handleLoadMore}
           className="max-h-[62vh] overflow-hidden"
         />
@@ -299,7 +384,7 @@ const HomePage: React.FC = () => {
           </div>
         ) : selectedReport ? (
           <div className="max-w-4xl">
-            <ReportSummary data={selectedReport} isHistory />
+            <ReportSummary data={selectedReport} isHistory onReanalyze={handleReanalyze} isReanalyzing={isAnalyzing} />
           </div>
         ) : (
           <div className="flex flex-col items-center justify-center h-full text-center">
