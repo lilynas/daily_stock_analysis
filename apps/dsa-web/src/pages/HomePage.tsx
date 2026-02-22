@@ -10,6 +10,7 @@ import { useAnalysisStore } from '../stores/analysisStore';
 import { ReportSummary } from '../components/report';
 import { HistoryList } from '../components/history';
 import { TaskPanel } from '../components/tasks';
+import { WatchList } from '../components/watchlist';
 import { useTaskStream } from '../hooks';
 
 /**
@@ -42,6 +43,7 @@ const HomePage: React.FC = () => {
 
   // 自选股列表
   const [stockList, setStockList] = useState<string[]>([]);
+  const [configVersion, setConfigVersion] = useState<string>('');
 
   // 用于跟踪当前分析请求，避免竞态条件
   const analysisRequestIdRef = useRef<number>(0);
@@ -272,8 +274,9 @@ const HomePage: React.FC = () => {
     const loadStockList = async () => {
       try {
         const config = await systemConfigApi.getConfig(false);
+        setConfigVersion(config.configVersion || '');
         const stockItem = config.items?.find(
-          (item) => item.key === 'STOCK_LIST' || item.key === 'stock_list'
+          (item: { key: string }) => item.key === 'STOCK_LIST' || item.key === 'stock_list'
         );
         const raw = stockItem?.value || '';
         if (raw.trim()) {
@@ -286,6 +289,41 @@ const HomePage: React.FC = () => {
     };
     loadStockList();
   }, []);
+
+  // 持久化自选股到系统配置
+  const persistStockList = async (newList: string[]) => {
+    try {
+      const result = await systemConfigApi.update({
+        configVersion,
+        items: [{ key: 'STOCK_LIST', value: newList.join(',') }],
+      });
+      setConfigVersion(result.configVersion || configVersion);
+    } catch (err) {
+      console.error('保存自选股失败:', err);
+    }
+  };
+
+  // 添加自选股
+  const handleAddStock = (code: string) => {
+    const upper = code.toUpperCase();
+    if (stockList.includes(upper)) return;
+    const newList = [...stockList, upper];
+    setStockList(newList);
+    persistStockList(newList);
+  };
+
+  // 删除自选股
+  const handleRemoveStock = (code: string) => {
+    const newList = stockList.filter((c: string) => c !== code);
+    setStockList(newList);
+    persistStockList(newList);
+  };
+
+  // 点击自选股分析
+  const handleWatchlistAnalyze = (code: string) => {
+    setStockCode(code);
+    handleAnalyze(code);
+  };
 
   return (
     <div
@@ -336,25 +374,6 @@ const HomePage: React.FC = () => {
             )}
           </button>
         </div>
-        {stockList.length > 0 && (
-          <div className="flex items-center gap-1.5 flex-shrink-0 overflow-x-auto ml-1" style={{ maxWidth: '50%' }}>
-            <span className="text-xs text-muted whitespace-nowrap">自选:</span>
-            {stockList.map((code) => (
-              <button
-                key={code}
-                type="button"
-                onClick={() => {
-                  setStockCode(code);
-                  handleAnalyze(code);
-                }}
-                disabled={isAnalyzing}
-                className="px-2 py-0.5 text-xs rounded-full bg-white/5 hover:bg-cyan/15 text-secondary hover:text-cyan border border-white/10 hover:border-cyan/30 transition-all whitespace-nowrap disabled:opacity-50"
-              >
-                {code}
-              </button>
-            ))}
-          </div>
-        )}
       </header>
 
       {/* 左侧：任务面板 + 历史列表 */}
@@ -362,6 +381,13 @@ const HomePage: React.FC = () => {
         className="col-start-2 row-start-2 flex flex-col gap-3 overflow-hidden min-h-0"
       >
         <TaskPanel tasks={activeTasks} />
+        <WatchList
+          stocks={stockList}
+          onAdd={handleAddStock}
+          onRemove={handleRemoveStock}
+          onAnalyze={handleWatchlistAnalyze}
+          isAnalyzing={isAnalyzing}
+        />
         <HistoryList
           items={historyItems}
           isLoading={isLoadingHistory}
