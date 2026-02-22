@@ -1,0 +1,230 @@
+# Docker Multi-Arch Build for Web and Scheduler Modes
+# Builds and pushes separate images for web mode and scheduler mode to GHCR
+
+name: Docker Build Multi-Arch
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Image tag version (e.g., v1.0.0, latest)'
+        required: true
+        default: 'latest'
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+concurrency:
+  group: docker-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-web:
+    name: Build Web Mode Image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve release ref
+        run: |
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            RELEASE_TAG="${{ inputs.image_tag }}"
+            echo "Using manual input tag: $RELEASE_TAG"
+          else
+            RELEASE_TAG="${GITHUB_REF_NAME}"
+            echo "Using event tag: $RELEASE_TAG"
+          fi
+          echo "RELEASE_TAG=$RELEASE_TAG" >> $GITHUB_ENV
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: |
+            image=moby/buildkit:master
+            network=host
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata for Web image
+        id: meta-web
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-web
+          tags: |
+            type=raw,value=${{ env.RELEASE_TAG }}
+            type=raw,value=latest,enable=${{ github.event_name != 'workflow_dispatch' || inputs.image_tag != 'latest' }}
+            type=sha,format=short
+          flavor: |
+            latest=true
+
+      - name: Build and push Web image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta-web.outputs.tags }}
+          labels: ${{ steps.meta-web.outputs.labels }}
+          cache-from: type=gha,scope=web
+          cache-to: type=gha,mode=max,scope=web
+          build-args: |
+            BUILD_MODE=web
+
+  build-scheduler:
+    name: Build Scheduler Mode Image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve release ref
+        run: |
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            RELEASE_TAG="${{ inputs.image_tag }}"
+            echo "Using manual input tag: $RELEASE_TAG"
+          else
+            RELEASE_TAG="${GITHUB_REF_NAME}"
+            echo "Using event tag: $RELEASE_TAG"
+          fi
+          echo "RELEASE_TAG=$RELEASE_TAG" >> $GITHUB_ENV
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: |
+            image=moby/buildkit:master
+            network=host
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata for Scheduler image
+        id: meta-scheduler
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-scheduler
+          tags: |
+            type=raw,value=${{ env.RELEASE_TAG }}
+            type=raw,value=latest,enable=${{ github.event_name != 'workflow_dispatch' || inputs.image_tag != 'latest' }}
+            type=sha,format=short
+          flavor: |
+            latest=true
+
+      - name: Build and push Scheduler image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta-scheduler.outputs.tags }}
+          labels: ${{ steps.meta-scheduler.outputs.labels }}
+          cache-from: type=gha,scope=scheduler
+          cache-to: type=gha,mode=max,scope=scheduler
+          build-args: |
+            BUILD_MODE=scheduler
+
+  summary:
+    name: Generate Summary
+    needs: [build-web, build-scheduler]
+    runs-on: ubuntu-latest
+    if: always()
+
+    steps:
+      - name: Generate build summary
+        run: |
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            RELEASE_TAG="${{ inputs.image_tag }}"
+          else
+            RELEASE_TAG="${GITHUB_REF_NAME}"
+          fi
+
+          echo "## Docker Multi-Arch Build Summary 🐳" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Web image status
+          if [[ "${{ needs.build-web.result }}" == "success" ]]; then
+            echo "### ✅ Web Mode Image" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "### ❌ Web Mode Image" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "- **Repository**: \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-web\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Tags**: \`${RELEASE_TAG}\`, \`latest\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Platforms**: linux/amd64, linux/arm64" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Scheduler image status
+          if [[ "${{ needs.build-scheduler.result }}" == "success" ]]; then
+            echo "### ✅ Scheduler Mode Image" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "### ❌ Scheduler Mode Image" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "- **Repository**: \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-scheduler\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Tags**: \`${RELEASE_TAG}\`, \`latest\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Platforms**: linux/amd64, linux/arm64" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          echo "### Pull Commands" >> $GITHUB_STEP_SUMMARY
+          echo '```bash' >> $GITHUB_STEP_SUMMARY
+          echo "# Web mode (API + WebUI)" >> $GITHUB_STEP_SUMMARY
+          echo "docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-web:${RELEASE_TAG}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "# Scheduler mode (定时任务)" >> $GITHUB_STEP_SUMMARY
+          echo "docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-scheduler:${RELEASE_TAG}" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          echo "### Usage Examples" >> $GITHUB_STEP_SUMMARY
+          echo '```bash' >> $GITHUB_STEP_SUMMARY
+          echo "# Run Web mode" >> $GITHUB_STEP_SUMMARY
+          echo "docker run -d \\" >> $GITHUB_STEP_SUMMARY
+          echo "  --name stock-web \\" >> $GITHUB_STEP_SUMMARY
+          echo "  -p 8000:8000 \\" >> $GITHUB_STEP_SUMMARY
+          echo "  --env-file .env \\" >> $GITHUB_STEP_SUMMARY
+          echo "  -v ./data:/app/data \\" >> $GITHUB_STEP_SUMMARY
+          echo "  -v ./logs:/app/logs \\" >> $GITHUB_STEP_SUMMARY
+          echo "  ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-web:${RELEASE_TAG}\" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "# Run Scheduler mode" >> $GITHUB_STEP_SUMMARY
+          echo "docker run -d \\" >> $GITHUB_STEP_SUMMARY
+          echo "  --name stock-scheduler \\" >> $GITHUB_STEP_SUMMARY
+          echo "  --env-file .env \\" >> $GITHUB_STEP_SUMMARY
+          echo "  -v ./data:/app/data \\" >> $GITHUB_STEP_SUMMARY
+          echo "  -v ./logs:/app/logs \\" >> $GITHUB_STEP_SUMMARY
+          echo "  ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-scheduler:${RELEASE_TAG}\" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
