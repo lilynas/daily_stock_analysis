@@ -319,7 +319,7 @@ const HomePage: React.FC = () => {
           </div>
           <button
             type="button"
-            onClick={handleAnalyze}
+            onClick={() => handleAnalyze()}
             disabled={!stockCode || isAnalyzing}
             className="btn-primary flex items-center gap-1.5 whitespace-nowrap flex-shrink-0"
           >
